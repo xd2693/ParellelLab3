@@ -12,7 +12,7 @@ from time import sleep
 # Before running, a dir named results has to be manually created to save output files.
 # 
 
-hash_workers = [2,4,6,8,16,100000]
+hash_workers = [1]
 data_workers = [1]
 comp_workers = [0]
 hashTimes = []
@@ -22,7 +22,7 @@ hashTime = 0.0
 groupTime = 0.0
 compTime = 0.0
 LOOPS = 10
-INPUTS = ["fine.txt"]
+INPUTS = ["coarse.txt"]
 
 csvs = []
 for inp in INPUTS:
