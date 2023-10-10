@@ -237,7 +237,8 @@ func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map
 }
 */
 
-func go_hash(wg *sync.WaitGroup, trees []*Tree, ch2 chan int, ch1 chan Pair) {
+// func go_hash(wg *sync.WaitGroup, trees []*Tree, ch2 chan int, ch1 chan Pair) {
+func go_hash(wg *sync.WaitGroup, trees []*Tree, ch1 chan Pair, ch2 chan int, m *sync.Mutex, hash_map *map[int][]int, data_workers int) {
 	defer wg.Done()
 	for {
 		id, ok := <-ch2
@@ -245,7 +246,15 @@ func go_hash(wg *sync.WaitGroup, trees []*Tree, ch2 chan int, ch1 chan Pair) {
 			return
 		}
 		p := Pair{hash_work(trees[id]), id}
-		ch1 <- p
+		if data_workers > 1 {
+			//add mutex
+			m.Lock()
+			(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
+			m.Unlock()
+		} else {
+			ch1 <- p
+		}
+
 	}
 
 }
@@ -254,20 +263,29 @@ func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map
 	ch1 := make(chan Pair, 16)
 	ch2 := make(chan int, 16)
 	wg := new(sync.WaitGroup)
+
+	// add mutex
+	var mu sync.Mutex
 	for i := 0; i < hash_workers; i++ {
 		wg.Add(1)
-		go go_hash(wg, trees, ch2, ch1)
+		//go go_hash(wg, trees, ch2, ch1)
+		//add for mutex
+		go go_hash(wg, trees, ch1, ch2, &mu, hash_map, data_workers)
 	}
+
 	go func() {
 		for i := 0; i < len(trees); i++ {
 			ch2 <- i
 		}
 		close(ch2)
-	}()
-	go func() {
 		wg.Wait()
+		if data_workers > 1 {
+			done <- true //add for mutex
+		}
+
 		close(ch1)
 	}()
+
 	if data_workers <= 1 {
 		for {
 			p, ok := <-ch1
