@@ -362,12 +362,12 @@ func main() {
 		os.Exit(0)
 	}
 
-	if *data_workers == 1 {
+	/*if *data_workers == 1 {
 		for _, p := range hash_pairs {
 			hash_map[p.val1] = append(hash_map[p.val1], p.val2)
 		}
 
-	}
+	}*/
 
 	group_time := time.Since(start)
 	fmt.Printf("hashGroupTime: %f\n", group_time.Seconds())
