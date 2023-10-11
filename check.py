@@ -47,17 +47,22 @@ for i in range(2, len(b)):
         break    
 #print(dict1)
 #print(dict2)
+sa=[]
+sb=[]
+
+for i in range(compare1+1, len(a)):
+    sa.append(sorted(a[i][2:]))
+for i in range(compare1+1, len(b)):
+    sb.append(sorted(b[i][2:]))
 
 if dict1!=dict2:
     print("hash not same\n")
 
 if len(a) != len(b):
     print("not same")
-for i in range(compare1+1,len(a)):
-    if len(a[i])!=len(b[i]):
-        #print("not same\n")
-        print("%s vs %s" % (a[i][0],b[i][0]))
-        break
-    for j in range(0,len(a[i])):
-        if a[i][j]!=b[i][j]:
-            print("%s vs %s" % (a[i][j],b[i][j]))
+for i in range(len(sa)):
+    if sa[i] in sb:
+        sb.remove(sa[i])
+    else:
+        print("group not same")
+    

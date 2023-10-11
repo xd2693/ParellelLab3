@@ -399,14 +399,30 @@ func main() {
 	}
 
 	n_val := len(nums) //number of trees
-	var comp_matrix [][]bool
+	/*var comp_matrix [][]bool
 	for i := 0; i < n_val; i++ {
 		comp_matrix = append(comp_matrix, make([]bool, n_val))
-	}
+	}*/
 
+	/*result_map := make(map[int]([][]bool))
+	for k, v := range hash_map {
+		if len(v) == 1 {
+			continue
+		}
+		var a [][]bool
+		for i := 0; i < len(v); i++{
+			var b []bool
+			for j := 0; j < len(v); j++{
+				b = append(b, false)
+			}
+			a = append(a, b)
+		}
+		result_map[k] = append(result_map[k], a)
+	}*/
+	results := make([][]int, n_val)
 	start_comp := time.Now()
 	if *comp_workers == 1 {
-		for _, v := range hash_map {
+		/*for _, v := range hash_map {
 
 			if len(v) == 1 {
 				comp_matrix[v[0]][v[0]] = true
@@ -423,6 +439,22 @@ func main() {
 					}
 				}
 			}
+		}*/
+		for _, v := range hash_map {
+			if len(v) > 1 {
+				for i := 0; i < len(v); i++ {
+					for j := i + 1; j < len(v); j++ {
+						t1 := v[i]
+						t2 := v[j]
+						result := Compare_byStack(trees[t1], trees[t2])
+						if result {
+							results[t1] = append(results[t1], t2)
+							results[t2] = append(results[t2], t1)
+						}
+
+					}
+				}
+			}
 		}
 	}
 
@@ -430,7 +462,7 @@ func main() {
 	fmt.Printf("compareTreeTime: %f\n", comp_time.Seconds())
 
 	group_count := 0
-	for i := 0; i < n_val; i++ {
+	/*for i := 0; i < n_val; i++ {
 		printed := false
 		if !comp_matrix[i][i] {
 			continue
@@ -452,6 +484,18 @@ func main() {
 			fmt.Print("\n")
 		}
 
+	}*/
+	for i := 0; i < n_val; i++ {
+		if len(results[i]) == 0 {
+			continue
+		}
+		fmt.Printf("group %d: %d ", group_count, i)
+		group_count++
+		for _, j := range results[i] {
+			fmt.Print(j, " ")
+			results[j] = nil
+		}
+		fmt.Print("\n")
 	}
 
 }
