@@ -202,101 +202,134 @@ func hash_work(tree *Tree) int {
 	return hash
 }
 
-/*
-func go_hash(wg *sync.WaitGroup, tree *Tree, id int, ch chan Pair) {
+func go_hash_only(wg *sync.WaitGroup, trees []*Tree, start_index int, end_index int) {
 	defer wg.Done()
-	p := Pair{hash_work(tree), id}
-	ch <- p
+	for i := start_index; i <= end_index; i++ {
+		hash_work(trees[i])
+
+	}
 }
 
-func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map *map[int][]int, done chan bool) {
-	ch := make(chan Pair, 100)
-	wg := new(sync.WaitGroup)
-	for i := 0; i < len(trees); i++ {
-		wg.Add(1)
-		go go_hash(wg, trees[i], i, ch)
-	}
-	go func() {
-		wg.Wait()
-		close(ch)
-	}()
-	if data_workers <= 1 {
-		for {
-			p, ok := <-ch
-			if !ok {
-				done <- true
-				return
-			}
-			if data_workers == 1 {
-				(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
-			}
-
-		}
-	}
-
-}
-*/
-
-// func go_hash(wg *sync.WaitGroup, trees []*Tree, ch2 chan int, ch1 chan Pair) {
-func go_hash(wg *sync.WaitGroup, trees []*Tree, ch1 chan Pair, ch2 chan int, m *sync.Mutex, hash_map *map[int][]int, data_workers int) {
+func go_hash_channel(wg *sync.WaitGroup, trees []*Tree, ch1 chan Pair, start_index int, end_index int) {
 	defer wg.Done()
-	for {
-		id, ok := <-ch2
-		if !ok {
-			return
-		}
-		p := Pair{hash_work(trees[id]), id}
-		if data_workers > 1 {
-			//add mutex
-			m.Lock()
-			(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
-			m.Unlock()
-		} else {
-			ch1 <- p
-		}
+	for i := start_index; i <= end_index; i++ {
+		p := Pair{hash_work(trees[i]), i}
+		ch1 <- p
+
+	}
+}
+
+func go_hash_mutex(wg *sync.WaitGroup, trees []*Tree, ch1 chan Pair, m *sync.Mutex, hash_map *map[int][]int, start_index int, end_index int) {
+	defer wg.Done()
+	for i := start_index; i <= end_index; i++ {
+		p := Pair{hash_work(trees[i]), i}
+
+		//add mutex
+		m.Lock()
+		(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
+		m.Unlock()
 
 	}
 
 }
 
 func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map *map[int][]int, done chan bool) {
-	ch1 := make(chan Pair, 16)
-	ch2 := make(chan int, 16)
+	ch1 := make(chan Pair, hash_workers)
+	//ch2 := make(chan int, 16)
 	wg := new(sync.WaitGroup)
 
 	// add mutex
 	var mu sync.Mutex
-	for i := 0; i < hash_workers; i++ {
-		wg.Add(1)
-		//go go_hash(wg, trees, ch2, ch1)
-		//add for mutex
-		go go_hash(wg, trees, ch1, ch2, &mu, hash_map, data_workers)
-	}
+	n_vals := len(trees)
+	re := n_vals % hash_workers
+	work_load := n_vals / hash_workers
+	start_index := 0
+	end_index := 0
 
-	go func() {
-		for i := 0; i < len(trees); i++ {
-			ch2 <- i
+	if data_workers == 0 {
+		for i := 0; i < hash_workers; i++ {
+			if re > 0 {
+				end_index = start_index + work_load
+				re -= 1
+			} else {
+				end_index = start_index + work_load - 1
+			}
+
+			wg.Add(1)
+			go go_hash_only(wg, trees, start_index, end_index)
+			start_index = end_index + 1
 		}
-		close(ch2)
-		wg.Wait()
-		if data_workers > 1 {
+		go func() {
+			wg.Wait()
 			done <- true //add for mutex
-		}
+			close(ch1)
+		}()
 
-		close(ch1)
-	}()
-	//if data_workers ==0, only receive the pairs and return; if data_workers==1, updata hash_map
-	if data_workers <= 1 {
+	} else if data_workers == 1 {
+		for i := 0; i < hash_workers; i++ {
+			if re > 0 {
+				end_index = start_index + work_load
+				re -= 1
+			} else {
+				end_index = start_index + work_load - 1
+			}
+
+			wg.Add(1)
+			go go_hash_channel(wg, trees, ch1, start_index, end_index)
+			start_index = end_index + 1
+		}
+		go func() {
+			wg.Wait()
+			close(ch1)
+		}()
 		for {
 			p, ok := <-ch1
 			if !ok {
 				done <- true
 				return
 			}
-			if data_workers == 1 {
-				(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
+			(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
+		}
+
+	} else {
+		for i := 0; i < hash_workers; i++ {
+			if re > 0 {
+				end_index = start_index + work_load
+				re -= 1
+			} else {
+				end_index = start_index + work_load - 1
 			}
 
+			wg.Add(1)
+			//go go_hash(wg, trees, ch2, ch1)
+			//add for mutex
+			go go_hash_mutex(wg, trees, ch1, &mu, hash_map, start_index, end_index)
+			start_index = end_index + 1
+		}
+		go func() {
+			wg.Wait()
+			done <- true //add for mutex
+			close(ch1)
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		if data_workers > 1 || data_workers == 0 {
+			done <- true //add for mutex
+		}
+		close(ch1)
+	}()
+	// if data_workers==1, updata hash_map
+	if data_workers == 1 {
+		for {
+			p, ok := <-ch1
+			if !ok {
+				done <- true
+				return
+			}
+
+			(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
 		}
 	}
 
@@ -348,7 +381,7 @@ func main() {
 		}
 
 	} else {
-		//fmt.Println("parellel hash")
+		fmt.Println("parellel hash")
 		done := make(chan bool)
 		go central_manager(*hash_workers, *data_workers, trees, &hash_map, done)
 		<-done
