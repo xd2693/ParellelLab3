@@ -313,26 +313,6 @@ func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map
 		}()
 	}
 
-	go func() {
-		wg.Wait()
-		if data_workers > 1 || data_workers == 0 {
-			done <- true //add for mutex
-		}
-		close(ch1)
-	}()
-	// if data_workers==1, updata hash_map
-	if data_workers == 1 {
-		for {
-			p, ok := <-ch1
-			if !ok {
-				done <- true
-				return
-			}
-
-			(*hash_map)[p.val1] = append((*hash_map)[p.val1], p.val2)
-		}
-	}
-
 }
 
 type Pair struct {
