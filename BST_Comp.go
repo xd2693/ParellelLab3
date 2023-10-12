@@ -320,6 +320,138 @@ type Pair struct {
 	val2 int
 }
 
+type CompWorkBuffer struct {
+	mu           sync.Mutex
+	count        int
+	MAX_WORK     int
+	isFull       bool
+	work         []Pair
+	insert_index int
+	pop_index    int
+	wait_q       int
+}
+
+func (work_buffer *CompWorkBuffer) init(comp_workers int) {
+	work_buffer.count = 0
+	work_buffer.MAX_WORK = comp_workers
+	work_buffer.isFull = false
+	work_buffer.work = make([]Pair, work_buffer.MAX_WORK)
+	work_buffer.insert_index = 0
+	work_buffer.pop_index = 0
+	work_buffer.wait_q = 0
+}
+
+func (work_buffer *CompWorkBuffer) try_acquire() bool {
+	work_buffer.mu.Lock()
+	r := false
+	if work_buffer.count == 0 {
+		r = true
+		work_buffer.wait_q++
+	}
+	work_buffer.mu.Unlock()
+	return r
+}
+func (work_buffer *CompWorkBuffer) try_insert() bool {
+	work_buffer.mu.Lock()
+	r := false
+	if work_buffer.count == work_buffer.MAX_WORK {
+		r = true
+		work_buffer.isFull = true
+	}
+	work_buffer.mu.Unlock()
+	return r
+}
+
+func (work_buffer *CompWorkBuffer) acquire_work(ch_m chan bool) (Pair, bool) {
+	defer work_buffer.mu.Unlock()
+	work_buffer.mu.Lock()
+	if work_buffer.count == 0 {
+		work_buffer.wait_q++
+		return Pair{}, false
+	}
+	work_buffer.count--
+	pair := work_buffer.work[work_buffer.pop_index]
+	//fmt.Println(work_buffer.work)
+	//fmt.Println("in acquir work", work_buffer.pop_index, pair.val1, pair.val2)
+	work_buffer.pop_index = work_buffer.pop_index + 1
+	if work_buffer.pop_index >= work_buffer.MAX_WORK {
+		work_buffer.pop_index = 0
+	}
+	if work_buffer.isFull {
+		ch_m <- true
+		work_buffer.isFull = false
+	}
+
+	return pair, true
+}
+
+func (work_buffer *CompWorkBuffer) insert_work(pair Pair, ch_w chan bool) bool {
+	defer work_buffer.mu.Unlock()
+	work_buffer.mu.Lock()
+	if work_buffer.count == work_buffer.MAX_WORK {
+		work_buffer.isFull = true
+		return false
+	}
+	work_buffer.count++
+	work_buffer.work[work_buffer.insert_index] = pair
+	//fmt.Println("in insert work", work_buffer.work)
+	work_buffer.insert_index = work_buffer.insert_index + 1
+	if work_buffer.insert_index >= work_buffer.MAX_WORK {
+		work_buffer.insert_index = 0
+	}
+	if work_buffer.wait_q > 0 {
+		ch_w <- true
+		work_buffer.wait_q--
+	}
+
+	return true
+}
+func (work_buffer *CompWorkBuffer) insert_done(ch_w chan bool) {
+	//work_buffer.allDone = true
+	for i := 0; i < work_buffer.MAX_WORK; i++ {
+		ch_w <- false
+	}
+}
+
+// spawn goroutine for each pair of trees comparison
+func go_comp(wg *sync.WaitGroup, pair Pair, trees []*Tree, hash_log [][]int, result_map map[int]([][]bool)) {
+	defer wg.Done()
+	t1 := pair.val1
+	t2 := pair.val2
+	result := Compare_byStack(trees[t1], trees[t2])
+	key := hash_log[t1][0]
+	id1 := hash_log[t1][1]
+	id2 := hash_log[t2][1]
+	(result_map[key])[id1][id2] = result
+	(result_map[key])[id2][id1] = result
+}
+
+func comp_work(wg *sync.WaitGroup, trees []*Tree, hash_log [][]int, result_map map[int]([][]bool), ch_w chan bool, ch_m chan bool, work_buffer *CompWorkBuffer) {
+	defer wg.Done()
+	for {
+		pair, succ := work_buffer.acquire_work(ch_m)
+		if !succ {
+			//fmt.Println("empty")
+			r := <-ch_w
+			if !r {
+				//fmt.Println("done")
+				return
+			}
+			continue
+		}
+		t1 := pair.val1
+		t2 := pair.val2
+		//fmt.Println(t1, t2)
+		result := Compare_byStack(trees[t1], trees[t2])
+		key := hash_log[t1][0]
+		id1 := hash_log[t1][1]
+		id2 := hash_log[t2][1]
+		(result_map[key])[id1][id2] = result
+		(result_map[key])[id2][id1] = result
+	}
+
+}
+
 func main() {
 	hash_workers := flag.Int("hash-workers", 1, "number of threads to do hash computation")
 	data_workers := flag.Int("data-workers", 0, "number of threads to update the map")
@@ -361,7 +493,7 @@ func main() {
 		}
 
 	} else {
-		fmt.Println("parellel hash")
+		//fmt.Println("parellel hash")
 		done := make(chan bool)
 		go central_manager(*hash_workers, *data_workers, trees, &hash_map, done)
 		<-done
@@ -403,23 +535,29 @@ func main() {
 	for i := 0; i < n_val; i++ {
 		comp_matrix = append(comp_matrix, make([]bool, n_val))
 	}*/
-
-	/*result_map := make(map[int]([][]bool))
+	hash_log := make([][]int, n_val)       // each line: hash key&id as in hash_map[key][id]
+	result_map := make(map[int]([][]bool)) //small matrix for each key in hash_map
 	for k, v := range hash_map {
 		if len(v) == 1 {
 			continue
 		}
 		var a [][]bool
-		for i := 0; i < len(v); i++{
+		for i, id := range v {
 			var b []bool
-			for j := 0; j < len(v); j++{
-				b = append(b, false)
+			for j := 0; j < len(v); j++ {
+				if i == j {
+					b = append(b, true)
+				} else {
+					b = append(b, false)
+				}
+
 			}
 			a = append(a, b)
+			hash_log[id] = append(hash_log[id], k, i)
 		}
-		result_map[k] = append(result_map[k], a)
-	}*/
-	results := make([][]int, n_val)
+		result_map[k] = a
+	}
+
 	start_comp := time.Now()
 	if *comp_workers == 1 {
 		/*for _, v := range hash_map {
@@ -440,22 +578,68 @@ func main() {
 				}
 			}
 		}*/
-		for _, v := range hash_map {
-			if len(v) > 1 {
-				for i := 0; i < len(v); i++ {
-					for j := i + 1; j < len(v); j++ {
-						t1 := v[i]
+
+		for k, v := range hash_map {
+			l := len(v)
+			if l > 1 {
+				for i := 0; i < l; i++ {
+					t1 := v[i]
+					id1 := hash_log[t1][1]
+					//(result_map[k])[id1][id1] = true
+					for j := i + 1; j < l; j++ {
 						t2 := v[j]
+						id2 := hash_log[t2][1]
 						result := Compare_byStack(trees[t1], trees[t2])
-						if result {
-							results[t1] = append(results[t1], t2)
-							results[t2] = append(results[t2], t1)
-						}
+						(result_map[k])[id1][id2] = result
+						(result_map[k])[id2][id1] = result
 
 					}
 				}
 			}
 		}
+	} else {
+		wg := new(sync.WaitGroup)
+		//spawn one goroutine for each pair of trees
+		/*for _, v := range hash_map {
+			l := len(v)
+			if l > 1 {
+				for i := 0; i < l; i++ {
+					for j := i + 1; j < l; j++ {
+						wg.Add(1)
+						pair := Pair{v[i], v[j]}
+						go go_comp(wg, pair, trees, hash_log, result_map)
+					}
+				}
+			}
+		}*/
+		//use work buffer
+		ch_m := make(chan bool)
+		ch_w := make(chan bool)
+		work_buffer := CompWorkBuffer{}
+		work_buffer.init(*comp_workers)
+		for i := 0; i < *comp_workers; i++ {
+			wg.Add(1)
+			go comp_work(wg, trees, hash_log, result_map, ch_w, ch_m, &work_buffer)
+		}
+		for _, v := range hash_map {
+			l := len(v)
+			if l > 1 {
+				for i := 0; i < l; i++ {
+					for j := i + 1; j < l; j++ {
+						pair := Pair{v[i], v[j]}
+						//fmt.Println("inserting", v[i], v[j])
+						for work_buffer.insert_work(pair, ch_w) == false {
+							//fmt.Println("full")
+							<-ch_m
+						}
+					}
+				}
+			}
+		}
+		//fmt.Println("insert done")
+		close(ch_w)
+		wg.Wait()
+		//close(ch_m)
 	}
 
 	comp_time := time.Since(start_comp)
@@ -485,17 +669,29 @@ func main() {
 		}
 
 	}*/
-	for i := 0; i < n_val; i++ {
-		if len(results[i]) == 0 {
-			continue
+
+	for k, v := range result_map {
+		l := len(v)
+		for i := 0; i < l; i++ {
+			printed := false
+			if !v[i][i] {
+				continue
+			}
+			for j := i + 1; j < l; j++ {
+				if v[i][j] {
+					if !printed {
+						fmt.Printf("group %d: %d ", group_count, hash_map[k][i])
+						group_count++
+						printed = true
+					}
+					v[j][j] = false
+					fmt.Print(hash_map[k][j], " ")
+				}
+			}
+			if printed {
+				fmt.Print("\n")
+			}
 		}
-		fmt.Printf("group %d: %d ", group_count, i)
-		group_count++
-		for _, j := range results[i] {
-			fmt.Print(j, " ")
-			results[j] = nil
-		}
-		fmt.Print("\n")
 	}
 
 }
