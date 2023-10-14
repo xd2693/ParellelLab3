@@ -329,6 +329,7 @@ type CompWorkBuffer struct {
 	insert_index int
 	pop_index    int
 	wait_q       int
+	wake_point   int
 }
 
 func (work_buffer *CompWorkBuffer) init(comp_workers int) {
@@ -339,34 +340,15 @@ func (work_buffer *CompWorkBuffer) init(comp_workers int) {
 	work_buffer.insert_index = 0
 	work_buffer.pop_index = 0
 	work_buffer.wait_q = 0
-}
-
-func (work_buffer *CompWorkBuffer) try_acquire() bool {
-	work_buffer.mu.Lock()
-	r := false
-	if work_buffer.count == 0 {
-		r = true
-		work_buffer.wait_q++
-	}
-	work_buffer.mu.Unlock()
-	return r
-}
-func (work_buffer *CompWorkBuffer) try_insert() bool {
-	work_buffer.mu.Lock()
-	r := false
-	if work_buffer.count == work_buffer.MAX_WORK {
-		r = true
-		work_buffer.isFull = true
-	}
-	work_buffer.mu.Unlock()
-	return r
+	work_buffer.wake_point = comp_workers / 2
 }
 
 func (work_buffer *CompWorkBuffer) acquire_work(ch_m chan bool) (Pair, bool) {
-	defer work_buffer.mu.Unlock()
 	work_buffer.mu.Lock()
+	//send := false
 	if work_buffer.count == 0 {
 		work_buffer.wait_q++
+		work_buffer.mu.Unlock()
 		return Pair{}, false
 	}
 	work_buffer.count--
@@ -377,40 +359,62 @@ func (work_buffer *CompWorkBuffer) acquire_work(ch_m chan bool) (Pair, bool) {
 	if work_buffer.pop_index >= work_buffer.MAX_WORK {
 		work_buffer.pop_index = 0
 	}
-	if work_buffer.isFull {
+	if work_buffer.count == work_buffer.wake_point && work_buffer.isFull {
+		//fmt.Println("wake up main")
 		ch_m <- true
-		work_buffer.isFull = false
 	}
+
+	work_buffer.mu.Unlock()
 
 	return pair, true
 }
 
-func (work_buffer *CompWorkBuffer) insert_work(pair Pair, ch_w chan bool) bool {
-	defer work_buffer.mu.Unlock()
+func (work_buffer *CompWorkBuffer) insert_work(pairs []Pair, ch_w chan bool, last_batch bool) int {
+
+	load_count := 0
 	work_buffer.mu.Lock()
-	if work_buffer.count == work_buffer.MAX_WORK {
+	i := 0
+	for ; i < work_buffer.MAX_WORK; i++ {
+		if (pairs[i] == Pair{}) {
+			continue
+		}
+		work_buffer.count++
+		work_buffer.work[work_buffer.insert_index] = pairs[i]
+		pairs[i] = Pair{}
+		work_buffer.insert_index = work_buffer.insert_index + 1
+		if work_buffer.insert_index >= work_buffer.MAX_WORK {
+			work_buffer.insert_index = 0
+		}
+		load_count++
+		if work_buffer.count == work_buffer.MAX_WORK {
+			break
+		}
+	}
+	//fmt.Println("i=", i)
+	if i >= (work_buffer.MAX_WORK-1) && last_batch {
+		work_buffer.isFull = false
+		//fmt.Println("isFull false")
+	} else {
 		work_buffer.isFull = true
-		return false
 	}
-	work_buffer.count++
-	work_buffer.work[work_buffer.insert_index] = pair
-	//fmt.Println("in insert work", work_buffer.work)
-	work_buffer.insert_index = work_buffer.insert_index + 1
-	if work_buffer.insert_index >= work_buffer.MAX_WORK {
-		work_buffer.insert_index = 0
-	}
-	if work_buffer.wait_q > 0 {
+	/*
+		for work_buffer.wait_q > 0 {
+			//fmt.Println("wake up go work")
+			ch_w <- true
+			work_buffer.wait_q--
+		}
+		work_buffer.mu.Unlock()*/
+
+	wakeup_call := work_buffer.wait_q
+	work_buffer.wait_q = 0
+	work_buffer.mu.Unlock()
+	for ; wakeup_call > 0; wakeup_call-- {
 		ch_w <- true
-		work_buffer.wait_q--
 	}
 
-	return true
-}
-func (work_buffer *CompWorkBuffer) insert_done(ch_w chan bool) {
-	//work_buffer.allDone = true
-	for i := 0; i < work_buffer.MAX_WORK; i++ {
-		ch_w <- false
-	}
+	//fmt.Println("in insert work", work_buffer.work)
+
+	return load_count
 }
 
 // spawn goroutine for each pair of trees comparison
@@ -428,13 +432,15 @@ func go_comp(wg *sync.WaitGroup, pair Pair, trees []*Tree, hash_log [][]int, res
 
 func comp_work(wg *sync.WaitGroup, trees []*Tree, hash_log [][]int, result_map map[int]([][]bool), ch_w chan bool, ch_m chan bool, work_buffer *CompWorkBuffer) {
 	defer wg.Done()
+	sleep := 0
 	for {
 		pair, succ := work_buffer.acquire_work(ch_m)
 		if !succ {
 			//fmt.Println("empty")
+			sleep++
 			r := <-ch_w
 			if !r {
-				//fmt.Println("done")
+				//fmt.Println("empty sleep", sleep)
 				return
 			}
 			continue
@@ -613,30 +619,74 @@ func main() {
 			}
 		}*/
 		//use work buffer
+		sleep := 0
 		ch_m := make(chan bool)
-		ch_w := make(chan bool)
+		ch_w := make(chan bool, *comp_workers)
 		work_buffer := CompWorkBuffer{}
 		work_buffer.init(*comp_workers)
+		work_load := make([]Pair, *comp_workers)
+		load_n := *comp_workers
+		go_sleep := false
+		last_batch := false
+
 		for i := 0; i < *comp_workers; i++ {
 			wg.Add(1)
 			go comp_work(wg, trees, hash_log, result_map, ch_w, ch_m, &work_buffer)
 		}
+		total := 0
 		for _, v := range hash_map {
 			l := len(v)
 			if l > 1 {
 				for i := 0; i < l; i++ {
 					for j := i + 1; j < l; j++ {
-						pair := Pair{v[i], v[j]}
-						//fmt.Println("inserting", v[i], v[j])
-						for work_buffer.insert_work(pair, ch_w) == false {
-							//fmt.Println("full")
+
+						if load_n > 0 {
+							total++
+							pair := Pair{v[i], v[j]}
+							//fmt.Println("inserting", v[i], v[j])
+							work_load[load_n-1] = pair
+							load_n--
+							continue
+						}
+						j--
+						//fmt.Println(work_load)
+						if go_sleep {
+							sleep++
+							//fmt.Println("main sleep")
 							<-ch_m
+							go_sleep = false
+						}
+						load_n = work_buffer.insert_work(work_load, ch_w, last_batch)
+						//fmt.Println("after insert ", work_load, load_n)
+						if load_n > 0 {
+							go_sleep = true
 						}
 					}
 				}
 			}
 		}
-		//fmt.Println("insert done")
+
+		work_left := *comp_workers
+		for {
+			//fmt.Println(work_load, load_n)
+			work_left -= load_n
+			if work_left > 0 {
+				last_batch = true
+
+			} else {
+				break
+			}
+			if go_sleep {
+				//fmt.Println("main sleep")
+				sleep++
+				<-ch_m
+				go_sleep = true
+			}
+			load_n = work_buffer.insert_work(work_load, ch_w, last_batch)
+		}
+
+		//fmt.Println("sleep", sleep)
+		//fmt.Println("total", total)
 		close(ch_w)
 		wg.Wait()
 		//close(ch_m)
