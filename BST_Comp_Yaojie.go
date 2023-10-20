@@ -258,8 +258,9 @@ func optional_dataworker(wg *sync.WaitGroup, ch1 chan Pair, hash_map *map[int]*[
 		if exists {
 			//This is not "writing" to map, just change existing key's value
 			//Just need to make sure the same key's value changed sequentially using fine grained locks
-			*array = append(*array, p.val2)
-			(*hash_map)[p.val1] = array
+			//*array.append(p.val2)
+			x := append(*array, p.val2)
+			(*hash_map)[p.val1] = &x
 			read_write.release_read()
 
 		} else {
@@ -269,8 +270,8 @@ func optional_dataworker(wg *sync.WaitGroup, ch1 chan Pair, hash_map *map[int]*[
 			array = &[]int{p.val2}
 			(*hash_map)[p.val1] = array
 			read_write.release_write()
-			fine_grain_lock.unlock_hash(p.val1)
 		}
+		fine_grain_lock.unlock_hash(p.val1)
 
 	}
 }
@@ -475,6 +476,7 @@ type LockFreeReadWrite struct {
 	lock           sync.Mutex
 	max_readers    int32
 	resource_count atomic.Int32
+	rwLock         sync.RWMutex
 }
 
 func (readWrite *LockFreeReadWrite) init(readers int32) {
@@ -483,7 +485,7 @@ func (readWrite *LockFreeReadWrite) init(readers int32) {
 }
 
 func (readWrite *LockFreeReadWrite) gain_read() {
-	readWrite.lock.Lock()
+	//readWrite.lock.Lock()
 	// for {
 	// 	after_minus := readWrite.resource_count.Add(-1)
 	// 	if after_minus >= 0 {
@@ -499,15 +501,17 @@ func (readWrite *LockFreeReadWrite) gain_read() {
 	// 		}
 	// 	}
 	// }
+	readWrite.rwLock.RLock()
 }
 
 func (readWrite *LockFreeReadWrite) release_read() {
-	readWrite.lock.Unlock()
+	//readWrite.lock.Unlock()
 	//readWrite.resource_count.Add(1)
+	readWrite.rwLock.RUnlock()
 }
 
 func (readWrite *LockFreeReadWrite) gain_write() {
-	readWrite.lock.Lock()
+	//readWrite.lock.Lock()
 	// for {
 	// 	after_minus := readWrite.resource_count.Add(-readWrite.max_readers)
 	// 	if after_minus == 0 {
@@ -533,11 +537,13 @@ func (readWrite *LockFreeReadWrite) gain_write() {
 	// 		}
 	// 	}
 	// }
+	readWrite.rwLock.Lock()
 }
 
 func (readWrite *LockFreeReadWrite) release_write() {
-	readWrite.lock.Unlock()
+	//readWrite.lock.Unlock()
 	//readWrite.resource_count.Add(readWrite.max_readers)
+	readWrite.rwLock.Unlock()
 }
 
 type ReliableWake struct {
@@ -753,7 +759,7 @@ func main() {
 		trees = append(trees, t)
 	}
 
-	hash_map := make(map[int][]int)
+	hash_map := make(map[int]*[]int)
 	var hash_pairs []*Pair
 
 	start := time.Now()
@@ -782,7 +788,8 @@ func main() {
 
 	if *hash_workers == 1 && *data_workers == 1 {
 		for _, p := range hash_pairs {
-			hash_map[p.val1] = append(hash_map[p.val1], p.val2)
+			array_append := append(*hash_map[p.val1], p.val2)
+			hash_map[p.val1] = &array_append
 		}
 	}
 
@@ -790,9 +797,9 @@ func main() {
 	fmt.Printf("hashGroupTime: %f\n", group_time.Seconds())
 
 	for k, v := range hash_map {
-		if len(v) > 1 {
+		if len(*v) > 1 {
 			fmt.Printf("%d: ", k)
-			for _, val := range v {
+			for _, val := range *v {
 				fmt.Print(val, " ")
 			}
 			fmt.Print("\n")
@@ -811,13 +818,13 @@ func main() {
 	hash_log := make([][]int, n_val)       // each line: hash key&id as in hash_map[key][id]
 	result_map := make(map[int]([][]bool)) //small matrix for each key in hash_map
 	for k, v := range hash_map {
-		if len(v) == 1 {
+		if len(*v) == 1 {
 			continue
 		}
 		var a [][]bool
-		for i, id := range v {
+		for i, id := range *v {
 			var b []bool
-			for j := 0; j < len(v); j++ {
+			for j := 0; j < len(*v); j++ {
 				if i == j {
 					b = append(b, true)
 				} else {
@@ -853,14 +860,14 @@ func main() {
 		}*/
 
 		for k, v := range hash_map {
-			l := len(v)
+			l := len(*v)
 			if l > 1 {
 				for i := 0; i < l; i++ {
-					t1 := v[i]
+					t1 := (*v)[i]
 					id1 := hash_log[t1][1]
 					//(result_map[k])[id1][id1] = true
 					for j := i + 1; j < l; j++ {
-						t2 := v[j]
+						t2 := (*v)[j]
 						id2 := hash_log[t2][1]
 						result := Compare_byStack(trees[t1], trees[t2])
 						(result_map[k])[id1][id2] = result
@@ -902,11 +909,11 @@ func main() {
 		}
 		//total := 0
 		for _, v := range hash_map {
-			l := len(v)
+			l := len(*v)
 			if l > 1 {
 				for i := 0; i < l; i++ {
 					for j := i + 1; j < l; j++ {
-						pair := Pair{v[i], v[j]}
+						pair := Pair{(*v)[i], (*v)[j]}
 						_, full := local_buffer.add_work(pair)
 						if full {
 							for {
@@ -979,12 +986,12 @@ func main() {
 			for j := i + 1; j < l; j++ {
 				if v[i][j] {
 					if !printed {
-						fmt.Printf("group %d: %d ", group_count, hash_map[k][i])
+						fmt.Printf("group %d: %d ", group_count, (*hash_map[k])[i])
 						group_count++
 						printed = true
 					}
 					v[j][j] = false
-					fmt.Print(hash_map[k][j], " ")
+					fmt.Print((*hash_map[k])[j], " ")
 				}
 			}
 			if printed {
