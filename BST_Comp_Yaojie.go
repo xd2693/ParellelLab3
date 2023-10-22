@@ -227,8 +227,13 @@ func go_hash_mutex(wg *sync.WaitGroup, trees []*Tree, ch1 chan Pair, m *sync.Mut
 
 		//add mutex
 		m.Lock()
-		append_array := append(*(*hash_map)[p.val1], p.val2)
-		(*hash_map)[p.val1] = &append_array
+		array, exists := (*hash_map)[p.val1]
+		if exists {
+			*array = append(*array, p.val2)
+		} else {
+			array = &[]int{p.val2}
+			(*hash_map)[p.val1] = array
+		}
 		m.Unlock()
 
 	}
@@ -259,8 +264,7 @@ func optional_dataworker(wg *sync.WaitGroup, ch1 chan Pair, hash_map *map[int]*[
 			//This is not "writing" to map, just change existing key's value
 			//Just need to make sure the same key's value changed sequentially using fine grained locks
 			//*array.append(p.val2)
-			x := append(*array, p.val2)
-			(*hash_map)[p.val1] = &x
+			*array = append(*array, p.val2)
 			read_write.release_read()
 
 		} else {
@@ -332,8 +336,13 @@ func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map
 				done <- true
 				return
 			}
-			append_array := append(*(*hash_map)[p.val1], p.val2)
-			(*hash_map)[p.val1] = &append_array
+			array, exists := (*hash_map)[p.val1]
+			if exists {
+				*array = append(*array, p.val2)
+			} else {
+				array = &[]int{p.val2}
+				(*hash_map)[p.val1] = array
+			}
 		}
 
 	} else if data_workers == hash_workers {
@@ -362,7 +371,7 @@ func central_manager(hash_workers int, data_workers int, trees []*Tree, hash_map
 		fine_grain_lock.init(data_workers * 3)
 		data_channels := make([]chan Pair, data_workers)
 		for i := 0; i < data_workers; i++ {
-			data_channels[i] = make(chan Pair, hash_workers)
+			data_channels[i] = make(chan Pair, hash_workers*2)
 		}
 		var lock_free_rw LockFreeReadWrite
 		lock_free_rw.init(int32(data_workers))
@@ -486,64 +495,64 @@ func (readWrite *LockFreeReadWrite) init(readers int32) {
 
 func (readWrite *LockFreeReadWrite) gain_read() {
 	//readWrite.lock.Lock()
-	// for {
-	// 	after_minus := readWrite.resource_count.Add(-1)
-	// 	if after_minus >= 0 {
-	// 		return
-	// 	} else {
-	// 		//Give up and return things, wait for others to finish then retry
-	// 		readWrite.resource_count.Add(1)
-	// 		for {
-	// 			after_return := readWrite.resource_count.Load()
-	// 			if after_return > 0 {
-	// 				break
-	// 			}
-	// 		}
-	// 	}
-	// }
-	readWrite.rwLock.RLock()
+	for {
+		after_minus := readWrite.resource_count.Add(-1)
+		if after_minus >= 0 {
+			return
+		} else {
+			//Give up and return things, wait for others to finish then retry
+			readWrite.resource_count.Add(1)
+			for {
+				after_return := readWrite.resource_count.Load()
+				if after_return > 0 {
+					break
+				}
+			}
+		}
+	}
+	//readWrite.rwLock.RLock()
 }
 
 func (readWrite *LockFreeReadWrite) release_read() {
 	//readWrite.lock.Unlock()
-	//readWrite.resource_count.Add(1)
-	readWrite.rwLock.RUnlock()
+	readWrite.resource_count.Add(1)
+	// readWrite.rwLock.RUnlock()
 }
 
 func (readWrite *LockFreeReadWrite) gain_write() {
 	//readWrite.lock.Lock()
-	// for {
-	// 	after_minus := readWrite.resource_count.Add(-readWrite.max_readers)
-	// 	if after_minus == 0 {
-	// 		//gain access successful, exit
-	// 		return
-	// 	} else if after_minus < 0 && after_minus > -readWrite.max_readers {
-	// 		//First writer, though not gained, wait for anyone else to exit
-	// 		for {
-	// 			wait_for_return := readWrite.resource_count.Load()
-	// 			if wait_for_return == 0 {
-	// 				//gain access successful, exit
-	// 				return
-	// 			}
-	// 		}
-	// 	} else {
-	// 		//Give up and return things, wait for others to finish then retry
-	// 		readWrite.resource_count.Add(readWrite.max_readers)
-	// 		for {
-	// 			after_return := readWrite.resource_count.Load()
-	// 			if after_return > 0 {
-	// 				break
-	// 			}
-	// 		}
-	// 	}
-	// }
-	readWrite.rwLock.Lock()
+	for {
+		after_minus := readWrite.resource_count.Add(-readWrite.max_readers)
+		if after_minus == 0 {
+			//gain access successful, exit
+			return
+		} else if after_minus < 0 && after_minus > -readWrite.max_readers {
+			//First writer, though not gained, wait for anyone else to exit
+			for {
+				wait_for_return := readWrite.resource_count.Load()
+				if wait_for_return == 0 {
+					//gain access successful, exit
+					return
+				}
+			}
+		} else {
+			//Give up and return things, wait for others to finish then retry
+			readWrite.resource_count.Add(readWrite.max_readers)
+			for {
+				after_return := readWrite.resource_count.Load()
+				if after_return > 0 {
+					break
+				}
+			}
+		}
+	}
+	// readWrite.rwLock.Lock()
 }
 
 func (readWrite *LockFreeReadWrite) release_write() {
 	//readWrite.lock.Unlock()
-	//readWrite.resource_count.Add(readWrite.max_readers)
-	readWrite.rwLock.Unlock()
+	readWrite.resource_count.Add(readWrite.max_readers)
+	// readWrite.rwLock.Unlock()
 }
 
 type ReliableWake struct {
